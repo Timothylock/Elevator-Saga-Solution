@@ -1,67 +1,183 @@
 {
     init: function(elevators, floors) {
-        var requestPickupList = []
-        
-        function removeAllFromList(ls, item) {
-            if (ls.length > 0){
-                for( var i = ls.length-1; i--;){
-                    if (ls[i] === item) ls.splice(i, 1);
-                }
+        ////////////////////////
+        // Helper Functions
+        ////////////////////////
+
+        // Initialize the elevator directions
+        function initializeElevator(elevator) {
+            elevator.dir = "up";
+            setIndicators(elevator);
+            // This will allow the elevators to be proactive and park themselves somewhere
+            // else while they wait for the first requests (not from ground)
+            var chanceOfRandom = Math.floor(Math.random() * 100);
+
+            if (chanceOfRandom <= 30) {
+                elevator.goToFloor(bottomFloor, true);
+            } else {
+                elevator.goToFloor(Math.floor(Math.random() * floors.length), true)
             }
-        };
+        }
 
-        _.each(elevators, function(elevator) {
-            // When elevator is idle, head to a floor with people. 
-            elevator.on("idle", function() {
-                if (requestPickupList.length > 0){
-                    elevator.goToFloor(requestPickupList[0]);
-                    removeAllFromList(requestPickupList, requestPickupList[0]); // So that only 1 elevator will go in the event that all are idle
+        // Set the elevator direction indicator based on elevator.dir
+        function setIndicators(elevator) {
+            if (elevator.dir == "up") {
+                elevator.goingUpIndicator(true);
+                elevator.goingDownIndicator(false);
+            } else if (elevator.dir == "down") {
+                elevator.goingUpIndicator(false);
+                elevator.goingDownIndicator(true);
+            }
+        }
+
+        // Remove a floor from the given queue
+        function removeFloorFromQueue(queue, floorNum) {
+            var index = queue.indexOf(floorNum);
+            if (index > -1) {
+                queue.splice(index, 1);
+            }
+        }
+
+        // Returns the highest floor requested on the given elevator
+        function getHighestPressedFloor(elevator) {
+            if (elevator.getPressedFloors().length == 0) {
+                return -1;
+            }
+            return elevator.getPressedFloors().sort()[elevator.getPressedFloors().length - 1];
+        }
+
+        // Returns the highest requested floor going down
+        function getHighestRequestFloorGoingDown() {
+            var offset = 0;
+            if (downWaitingQueue.length == 0 || downWaitingQueue.length - 1 < offset) {
+                return -1;
+            } 
+            return downWaitingQueue.sort()[downWaitingQueue.length - 1 - offset];
+        }
+
+        // Returns the highest floor the elevator should go to
+        function getHighestFloorForElevator(elevator) {
+            return Math.max(getHighestRequestFloorGoingDown(), getHighestPressedFloor(elevator));
+        }
+
+        // Returns the lowest floor the elevator should go to
+        function getLowestFloorForElevator(elevator) {
+            return bottomFloor;
+        }
+
+        // Returns whether an elevator is scheduled to stop at the given floor in the given direction
+        function willAnElevatorStopHere(elevators, curelevator, floorNum, direction) {
+            elevators.forEach(function(elevator) {
+                var includesFloor = elevator.getPressedFloors().includes(floorNum);
+                var sameDir = elevator.dir == direction;
+                var sameElevator = elevator.getPressedFloors() == curelevator.getPressedFloors();
+                if (sameDir && !sameElevator && includesFloor) {
+                    var howFar = Math.abs(elevator.currentFloor() - floorNum)
+
+                    if (howFar <= 2) {
+                        console.log("YES")
+                        return true;
+                    }
                 }
             });
+            return false;
+        }
 
-            elevator.on("floor_button_pressed", function(floorNum) {
-                elevator.destinationQueue.push(floorNum);
-                elevator.checkDestinationQueue();
-            });
 
-            elevator.on("passing_floor", function(floorNum, direction) {
-                // Don't stop unless the elevator is supposed to stop there or theres room for more people
-                if(elevator.loadFactor() > 0.75) {
+        ////////////////////////
+        // Initialize
+        ////////////////////////
+        var topFloor = floors.length - 1;
+        var bottomFloor = 0;
+
+        var upWaitingQueue = [];
+        var downWaitingQueue = [];
+
+        elevators.forEach(initializeElevator);
+
+
+        ////////////////////
+        // Elevator Code
+        ////////////////////
+        elevators.forEach(function(elevator) {
+            elevator.on("passing_floor", function(floorNum, _d) {
+                // Stop if one of request floors
+                if (elevator.getPressedFloors().includes(floorNum) && elevator.dir != "down") {
+                    elevator.goToFloor(floorNum, true);
+                }
+
+                // Skip this floor if not one of the requested floors and the elevator is full
+                if (elevator.loadFactor() >= 0.6) {
                     return;
                 }
-                
-                // If the elevator is passing a floor, stop if that floor requested an elevator
-                if (requestPickupList.includes(floorNum)) {
-                    console.log("Stopping because this floor is requested");
-                    elevator.goToFloor(floorNum, true)
+
+                // Skip this floor if another elevator is already going to stop here
+                if (willAnElevatorStopHere(elevators, elevator, floorNum, elevator.dir)) {
+                    return;
                 }
-                
-                // If the elevator is passing a floor, stop if that floor is requested by a passenger
-                if (elevator.destinationQueue.includes(floorNum)) {
-                    console.log("Stopping because this floor is on the way");
-                    elevator.goToFloor(floorNum, true)
+
+                // Stop if people waiting to go the same dir on the floor
+                if (elevator.dir == "up" && upWaitingQueue.includes(floorNum)) {
+                    removeFloorFromQueue(upWaitingQueue, floorNum);
+                    elevator.goToFloor(floorNum, true);
+                } else if (elevator.dir == "down" && downWaitingQueue.includes(floorNum)) {
+                    removeFloorFromQueue(downWaitingQueue, floorNum);
+                    elevator.goToFloor(floorNum, true);
                 }
             });
 
-            elevator.on("stopped_at_floor", function(floorNum) {
-                // If an elevator is stopped at a floor, clear that floor from the requestPickupList since they have been picked up
-                removeAllFromList(requestPickupList, floorNum);
+            elevator.on("stopped_at_floor", function(floorNum, _d) {
+                // Bug fix - top/bottom floor doesn't get removed
+                if (floorNum == topFloor) {
+                    removeFloorFromQueue(downWaitingQueue, floorNum);
+                } else if (floorNum == bottomFloor) {
+                    removeFloorFromQueue(upWaitingQueue, floorNum);
+                }
 
-                // clear that floor from the elevator queue since all the people have been dropped off
-                removeAllFromList(elevator.destinationQueue, floorNum);
+                // Determines when to reverse the elevator direction
+                if (floorNum >= getHighestFloorForElevator(elevator) && floorNum != bottomFloor) {
+                    elevator.dir = "down";
+                } else if (floorNum <= getLowestFloorForElevator(elevator) && floorNum != topFloor) {
+                    elevator.dir = "up";
+                }
+
+                setIndicators(elevator);
+
+                // Send it to the top or bottom floor depending on which direction
+                // This just forces the elevator to go in the direction we want
+                if (elevator.dir == "up") {
+                    elevator.goToFloor(getHighestFloorForElevator(elevator), true);
+                } else if (elevator.dir == "down") {
+                    elevator.goToFloor(getLowestFloorForElevator(elevator), true);
+                }
+            });
+
+            elevator.on("idle", function() {
+                elevator.goToFloor(bottomFloor);
+                elevator.dir = "up";
+                setIndicators(elevator);
             });
         });
 
-        _.each(floors, function(floor) {
-            // When a floor requests an elevator, add it to the list so that an elevator passing by can stop
-            // or an elevator can come to the floor if the elevator is idle
-            floor.on("up_button_pressed down_button_pressed", function(event) {
-                var direction = event.indexOf('up') == 0 ? 'up' : 'down';
-                requestPickupList.push(floor.level);
+        ////////////////////
+        // Floor Code
+        ////////////////////
+        floors.forEach(function(floor) {
+            // Push onto the queue for next elevator heading up to stop at
+            floor.on("up_button_pressed", function(){
+                if (!upWaitingQueue.includes(floor.floorNum())) {
+                    upWaitingQueue.push(floor.floorNum());
+                }
+            });
+
+            // Push onto the queue for next elevator heading down to stop at
+            floor.on("down_button_pressed", function(){
+                if (!downWaitingQueue.includes(floor.floorNum())) {
+                    downWaitingQueue.push(floor.floorNum());
+                }
             });
         });
     },
-
         update: function(dt, elevators, floors) {
             // We normally don't need to do anything here
         }
